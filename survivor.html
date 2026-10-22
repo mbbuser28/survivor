@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>サバイバー（試作）</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #12161a; color: #e8efe9; overflow: hidden; touch-action: none;
+               font-family: system-ui, "Hiragino Sans", "Yu Gothic", sans-serif; }
+  canvas { display: block; position: fixed; inset: 0; }
+  .overlay { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center;
+             gap: 14px; background: rgba(8,12,14,0.88); text-align: center; padding: 16px; box-sizing: border-box; }
+  .overlay.show { display: flex; }
+  h1 { margin: 0; font-size: 34px; color: #ffd75e; }
+  .sub { color: #b8c4bc; font-size: 14px; max-width: 520px; line-height: 1.6; white-space: pre-line; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .card { width: 170px; padding: 12px 8px; border-radius: 10px; border: 3px solid #7d97aa; background: #25343a; color: #e8efe9;
+          font-size: 13px; cursor: pointer; line-height: 1.45; }
+  .card:hover { background: #2f4249; transform: translateY(-3px); }
+  .card .ic { font-size: 40px; line-height: 1.2; }
+  .card .nm { font-size: 15px; font-weight: 700; margin: 2px 0 4px; }
+  .card .ds { color: #c8d3cc; font-size: 12px; }
+  .card.new { border-color: #ffd75e; }
+  button.big { font-size: 18px; padding: 10px 24px; border: 0; border-radius: 8px; background: #e0b341; color: #1f2a2e; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="menu" class="overlay show">
+  <h1>🧛 サバイバー（試作）</h1>
+  <div class="sub">移動：WASD / 矢印キー（スマホ・マウスは画面をドラッグ）。攻撃は自動です。\n敵を倒して経験値の宝石を集め、レベルアップで武器を選び、時間いっぱい生き残ろう。\nM キーで音の ON/OFF。</div>
+  <div class="row" id="chars"></div>
+  <div class="sub" id="best"></div>
+</div>
+
+<div id="levelup" class="overlay">
+  <h1 id="luTitle">LEVEL UP！</h1>
+  <div class="row" id="luCards"></div>
+</div>
+
+<div id="endview" class="overlay">
+  <h1 id="endTitle"></h1>
+  <div class="sub" id="endBody"></div>
+  <button class="big" id="endBtn">もう一度あそぶ</button>
+</div>
+
+<script>
+// =====================================================
+//  設定（ここをいじるとバランスが変わります）
+// =====================================================
+const GOAL_SECONDS = 950;      // この秒数を生き残ればクリア（300 = 5分）
+const AUTO_PICK_SECONDS = 7;  // レベルアップの選択の制限時間。過ぎたらランダムに選ばれる（0 で無効）
+const MAX_ENEMIES = 320;       // 同時に出る敵の上限
+const MAX_WEAPONS = 6;         // 持てる武器の数
+const MAX_PASSIVES = 6;        // 持てるアイテムの数
+
+// ---- アイコン ----
+// 絵文字の代わりに、自作の画像を使えます。icons フォルダに PNG を置くと自動で使われます。
+// ファイル名の例：char_knight.png / enemy_bat.png / weapon_wand.png
+const ICON_DIR = 'icons/';
+const iconCache = {};
+const iconFailed = {};
+function iconImage(key) {
+  if (typeof Image === 'undefined' || iconFailed[key]) return null;
+  let img = iconCache[key];
+  if (!img) {
+    img = new Image();
+    img.onerror = () => { iconFailed[key] = true; };
+    img.src = ICON_DIR + key.replace(':', '_') + '.png';
+    iconCache[key] = img;
+  }
+  return (img.complete && img.naturalWidth > 0) ? img : null;
+}
+
+// =====================================================
+//  データ：キャラ・武器・アイテム・敵
+// =====================================================
+const CHARACTERS = [
+  { id: 'knight', name: '騎士アルト', icon: '🛡️', hp: 200, speed: 140, weapon: 'knife', desc: 'HPが高い。\n最初の武器：ナイフ' },
+  { id: 'mage',   name: '魔女ミラ',   icon: '🧙', hp: 150,  speed: 150, weapon: 'wand', cdMul: 0.85, desc: '攻撃の間隔が短い。\n最初の武器：魔法の杖' },
+  { id: 'monk',   name: '僧侶ホリィ', icon: '👼', hp: 180, speed: 145, weapon: 'garlic', regen: 0.6, desc: 'HPが少しずつ回復する。\n最初の武器：ニンニク' },
+];
+
+const WEAPONS = {
+  wand:   { name: '魔法の杖',   icon: '🪄', max: 5, desc: '近くの敵に魔法の弾を撃つ' },
+  knife:  { name: 'ナイフ',     icon: '🗡️', max: 5, desc: '向いている方向に飛ぶ。敵を貫通する' },
+  orbit:  { name: '聖なる書',   icon: '📖', max: 5, desc: '自分の周りを光が回る' },
+  garlic: { name: 'ニンニク',   icon: '🧄', max: 5, desc: '周りの敵に継続ダメージ' },
+  bolt:   { name: '稲妻',       icon: '⚡', max: 5, desc: '画面内の敵にランダムで落雷' },
+  axe:    { name: '斧',         icon: '🪓', max: 5, desc: '上に投げて弧を描く。貫通する' },
+};
+
+// 武器のレベルごとの性能（L = 1〜5）
+function wstat(id, L) {
+  switch (id) {
+    case 'wand':   return { dmg: 10 + 4 * (L - 1), cd: Math.max(0.35, 1.2 - 0.15 * (L - 1)), n: 1 + Math.floor((L - 1) / 2) };
+    case 'knife':  return { dmg: 14 + 3 * (L - 1),  cd: Math.max(0.4, 1.0 - 0.1 * (L - 1)),  n: 1 + Math.floor(L / 2) };
+    case 'orbit':  return { dmg: 6 + 2 * (L - 1),  cd: 0,                                     n: 1 + Math.ceil(L / 2), rad: 70 + 5 * L };
+    case 'garlic': return { dmg: 4 + 2 * (L - 1),  cd: 0.5,                                   rad: 55 + 9 * L };
+    case 'bolt':   return { dmg: 25 + 8 * (L - 1), cd: Math.max(0.7, 1.8 - 0.2 * (L - 1)),  n: 1 + Math.floor(L / 2), rad: 45 };
+    case 'axe':    return { dmg: 14 + 5 * (L - 1), cd: Math.max(0.6, 1.6 - 0.15 * (L - 1)), n: 1 + Math.floor((L - 1) / 2) };
+  }
+}
+function describe(id, L) {
+  const s = wstat(id, L);
+  return 'ダメージ ' + s.dmg + (s.n ? '／数 ' + s.n : '') + (s.cd ? '／間隔 ' + s.cd.toFixed(1) + '秒' : '') + (s.rad && id !== 'bolt' ? '／範囲 ' + s.rad : '');
+}
+
+const PASSIVES = {
+  might:  { name: '力の指輪',   icon: '💍', max: 5, desc: '攻撃力 +15%' },
+  clock:  { name: '懐中時計',   icon: '🕰️', max: 5, desc: '武器の間隔 -8%' },
+  boots:  { name: '韋駄天の靴', icon: '👢', max: 5, desc: '移動速度 +10%' },
+  heart:  { name: 'ハート',     icon: '❤️', max: 5, desc: '最大HP +20（回復も）' },
+  magnet: { name: '磁石',       icon: '🧲', max: 5, desc: '宝石を引き寄せる範囲 +30%' },
+  herb:   { name: '薬草',       icon: '🌿', max: 5, desc: 'HPの回復 +0.3/秒' },
+};
+
+// from: 出始める秒数 / elite: エリート / boss: ボス
+const ENEMIES = {
+  bat:    { name: 'コウモリ',   icon: '🦇', hp: 5,   speed: 95, dmg: 5,  r: 11, xp: 1,  from: 0 },
+  zombie: { name: 'ゾンビ',     icon: '🧟', hp: 18,  speed: 55, dmg: 8,  r: 15, xp: 2,  from: 20 },
+  skel:   { name: 'スケルトン', icon: '💀', hp: 30,  speed: 70, dmg: 10, r: 14, xp: 3,  from: 60 },
+  ghost:  { name: 'ゴースト',   icon: '👻', hp: 22,  speed: 88, dmg: 9,  r: 14, xp: 3,  from: 90 },
+  ogre:   { name: 'オーガ',     icon: '👹', hp: 220, speed: 46, dmg: 18, r: 26, xp: 25, elite: true },
+  reaper: { name: '死神',       icon: '☠️', hp: 1500, speed: 62, dmg: 35, r: 34, xp: 120, boss: true },
+};
+
+// =====================================================
+//  画面・入力
+// =====================================================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let VW = 800, VH = 600;
+function resize() {
+  VW = window.innerWidth || 800;
+  VH = window.innerHeight || 600;
+  canvas.width = VW;
+  canvas.height = VH;
+}
+window.addEventListener('resize', resize);
+resize();
+
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key.toLowerCase() === 'm') toggleSound();
+  initAudio();
+});
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+// 画面のドラッグで動かす（スマホ・マウス）
+const joy = { active: false, ox: 0, oy: 0, x: 0, y: 0 };
+canvas.addEventListener('pointerdown', e => { joy.active = true; joy.ox = joy.x = e.clientX; joy.oy = joy.y = e.clientY; initAudio(); });
+canvas.addEventListener('pointermove', e => { if (joy.active) { joy.x = e.clientX; joy.y = e.clientY; } });
+window.addEventListener('pointerup', () => { joy.active = false; });
+
+function inputVector() {
+  let x = 0, y = 0;
+  if (keys['a'] || keys['arrowleft']) x -= 1;
+  if (keys['d'] || keys['arrowright']) x += 1;
+  if (keys['w'] || keys['arrowup']) y -= 1;
+  if (keys['s'] || keys['arrowdown']) y += 1;
+  if (joy.active) {
+    const dx = joy.x - joy.ox, dy = joy.y - joy.oy;
+    const d = Math.hypot(dx, dy);
+    if (d > 8) { x = dx / Math.max(d, 60); y = dy / Math.max(d, 60); }
+  }
+  const l = Math.hypot(x, y);
+  return l > 1 ? { x: x / l, y: y / l } : { x, y };
+}
+
+// =====================================================
+//  ゲームの状態
+// =====================================================
+let mode = 'menu';          // 'menu' | 'play' | 'levelup' | 'end'
+let P, enemies, gems, shots, pops, fxs, grid;
+let T, kills, nextElite, reaperSpawned, spawnTimer, luTimer, pendingLevels, choices;
+
+function startGame(ch) {
+  P = {
+    ch, x: 0, y: 0, fx: 1, fy: 0,                // 位置・向いている方向
+    baseHp: ch.hp, hp: ch.hp, maxHp: ch.hp, baseSpeed: ch.speed, speed: ch.speed,
+    level: 1, xp: 0, need: xpNeed(1), inv: 0, orbitAngle: 0,
+    weapons: [{ id: ch.weapon, lv: 1, cd: 0.3 }], passives: {},
+    might: 1, cdMul: ch.cdMul || 1, magnet: 70, regen: ch.regen || 0,
+  };
+  recompute();
+  enemies = []; gems = []; shots = []; pops = []; fxs = [];
+  T = 0; kills = 0; nextElite = 120; reaperSpawned = false; spawnTimer = 0.5; pendingLevels = 0;
+  mode = 'play';
+  document.getElementById('menu').classList.remove('show');
+  document.getElementById('endview').classList.remove('show');
+}
+
+function xpNeed(level) { return 4 + level * 5; }
+
+// アイテムの効果を、持っているレベルから計算し直す
+function recompute() {
+  const p = P.passives;
+  P.might = 1 + 0.15 * (p.might || 0);
+  P.cdMul = Math.max(0.5, 1 - 0.08 * (p.clock || 0)) * (P.ch.cdMul || 1);
+  P.speed = P.baseSpeed * (1 + 0.1 * (p.boots || 0));
+  const newMax = P.baseHp + 50 * (p.heart || 0);
+  P.hp += newMax - P.maxHp;
+  P.maxHp = newMax;
+  P.magnet = 80 * (1 + 0.3 * (p.magnet || 0));
+  P.regen = (P.ch.regen || 0) + 0.6 * (p.herb || 0);
+}
+
+// =====================================================
+//  敵の出現
+// =====================================================
+function spawnEnemy(kind, atX, atY) {
+  const d = ENEMIES[kind];
+  let x = atX, y = atY;
+  if (x === undefined) {   // 画面の外の、プレイヤーを囲む輪の上
+    const a = Math.random() * Math.PI * 2;
+    const dist = Math.hypot(VW, VH) / 2 + 60;
+    x = P.x + Math.cos(a) * dist;
+    y = P.y + Math.sin(a) * dist;
+  }
+  const hpScale = 1 + T / 150;   // 時間とともに少し硬くなる
+  enemies.push({
+    kind, x, y, hp: d.hp * hpScale * (d.boss ? 1 : 1), maxHp: d.hp * hpScale,
+    speed: d.speed * (0.9 + Math.random() * 0.2), dmg: d.dmg * (1 + T / 400), r: d.r,
+    flash: 0, kx: 0, ky: 0, orbitCd: 0, dead: false, id: Math.random(),
+  });
+}
+
+function pickKind() {
+  const list = [];
+  for (const k in ENEMIES) {
+    const d = ENEMIES[k];
+    if (d.elite || d.boss || T < d.from) continue;
+    list.push([k, k === 'bat' ? Math.max(1, 6 - T / 40) : 3]);
+  }
+  let x = Math.random() * list.reduce((a, r) => a + r[1], 0);
+  for (const r of list) { x -= r[1]; if (x < 0) return r[0]; }
+  return 'bat';
+}
+
+function updateSpawns(dt) {
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnTimer = Math.max(0.12, 0.9 - T / 400);
+    const n = 1 + Math.floor(T / 90);
+    for (let i = 0; i < n && enemies.length < MAX_ENEMIES; i++) spawnEnemy(pickKind());
+  }
+  if (T >= nextElite && T >= 120) { spawnEnemy('ogre'); nextElite += 40; popText(P.x, P.y - 40, '⚠ エリート出現！', '#ff9a5a'); }
+  if (!reaperSpawned && T >= GOAL_SECONDS * 0.8) { reaperSpawned = true; spawnEnemy('reaper'); popText(P.x, P.y - 40, '☠ 死神が現れた！', '#ff5a5a'); }
+}
+
+// =====================================================
+//  ダメージ・ドロップ
+// =====================================================
+function hurt(e, dmg, kx, ky) {
+  if (e.dead) return;
+  const d = Math.round(dmg * P.might);
+  e.hp -= d;
+  e.flash = 0.08;
+  if (pops.length < 90) popText(e.x, e.y - e.r, String(d), '#fff');
+  const boss = ENEMIES[e.kind].boss;
+  if (!boss) { e.kx += (kx || 0) * 60; e.ky += (ky || 0) * 60; }
+  sfxHit();
+  if (e.hp <= 0) {
+    e.dead = true;
+    kills++;
+    gems.push({ x: e.x, y: e.y, v: ENEMIES[e.kind].xp });
+  }
+}
+
+function popText(x, y, text, color) { pops.push({ x, y, text, color, t: 0.7 }); }
+
+// =====================================================
+//  武器
+// =====================================================
+function nearestEnemies(n, maxDist) {
+  return enemies.filter(e => !e.dead && Math.hypot(e.x - P.x, e.y - P.y) < maxDist)
+    .sort((a, b) => Math.hypot(a.x - P.x, a.y - P.y) - Math.hypot(b.x - P.x, b.y - P.y)).slice(0, n);
+}
+
+function addShot(o) { shots.push(Object.assign({ hit: new Set(), life: 1.5, r: 8, pierce: 1, g: 0, spin: 0, ang: 0 }, o)); }
+
+function updateWeapons(dt) {
+  P.orbitAngle += dt * 2.6;
+  for (const w of P.weapons) {
+    const s = wstat(w.id, w.lv);
+    if (w.id === 'orbit') {   // 常に回っている光
+      for (let k = 0; k < s.n; k++) {
+        const a = P.orbitAngle + k * Math.PI * 2 / s.n;
+        const ox = P.x + Math.cos(a) * s.rad, oy = P.y + Math.sin(a) * s.rad;
+        w.orbs = w.orbs || [];
+        w.orbs[k] = { x: ox, y: oy };
+        for (const e of nearCells(ox, oy)) {
+          if (e.dead || e.orbitCd > 0) continue;
+          if (Math.hypot(e.x - ox, e.y - oy) < e.r + 12) { hurt(e, s.dmg, Math.cos(a), Math.sin(a)); e.orbitCd = 0.45; }
+        }
+      }
+      continue;
+    }
+    w.cd -= dt;
+    if (w.cd > 0) continue;
+    if (w.id === 'garlic') {   // 周りの敵に継続ダメージ
+      w.cd += s.cd * P.cdMul;
+      for (const e of nearCells(P.x, P.y, s.rad)) {
+        const d = Math.hypot(e.x - P.x, e.y - P.y);
+        if (!e.dead && d < s.rad + e.r) hurt(e, s.dmg, (e.x - P.x) / (d || 1), (e.y - P.y) / (d || 1));
+      }
+      fxs.push({ kind: 'ring', x: P.x, y: P.y, r: s.rad, t: 0.15, max: 0.15, color: 'rgba(180,255,120,0.5)' });
+      continue;
+    }
+    if (w.id === 'wand') {
+      const ts = nearestEnemies(s.n, 520);
+      if (!ts.length) { w.cd = 0.15; continue; }
+      w.cd = s.cd * P.cdMul;
+      for (const e of ts) {
+        const a = Math.atan2(e.y - P.y, e.x - P.x);
+        addShot({ x: P.x, y: P.y, vx: Math.cos(a) * 330, vy: Math.sin(a) * 330, dmg: s.dmg, r: 8, life: 1.6, pierce: 1, icon: '✨' });
+      }
+    } else if (w.id === 'knife') {
+      w.cd = s.cd * P.cdMul;
+      const base = Math.atan2(P.fy, P.fx);
+      for (let i = 0; i < s.n; i++) {
+        const a = base + (i - (s.n - 1) / 2) * 0.2;
+        addShot({ x: P.x, y: P.y, vx: Math.cos(a) * 480, vy: Math.sin(a) * 480, dmg: s.dmg, r: 8, life: 0.9, pierce: 3, icon: '🗡️', ang: a + Math.PI / 4 });
+      }
+    } else if (w.id === 'bolt') {
+      const view = enemies.filter(e => !e.dead && Math.abs(e.x - P.x) < VW / 2 && Math.abs(e.y - P.y) < VH / 2);
+      if (!view.length) { w.cd = 0.2; continue; }
+      w.cd = s.cd * P.cdMul;
+      for (let i = 0; i < s.n && view.length; i++) {
+        const e = view.splice(Math.floor(Math.random() * view.length), 1)[0];
+        fxs.push({ kind: 'bolt', x: e.x, y: e.y, t: 0.18, max: 0.18 });
+        for (const o of nearCells(e.x, e.y, s.rad)) if (!o.dead && Math.hypot(o.x - e.x, o.y - e.y) < s.rad + o.r) hurt(o, s.dmg, 0, 0);
+        sfxTone(900, 200, 0.12, 'sawtooth', 0.12);
+      }
+    } else if (w.id === 'axe') {
+      w.cd = s.cd * P.cdMul;
+      for (let i = 0; i < s.n; i++) {
+        const dir = (P.fx >= 0 ? 1 : -1) * (i % 2 ? -1 : 1);
+        addShot({ x: P.x, y: P.y, vx: dir * (70 + i * 25), vy: -320 - i * 30, g: 760, dmg: s.dmg, r: 14, life: 2.2, pierce: 99, icon: '🪓', spin: 9 });
+      }
+    }
+  }
+}
+
+function updateShots(dt) {
+  for (const p of shots) {
+    p.vy += p.g * dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+    p.ang += p.spin * dt;
+    for (const e of nearCells(p.x, p.y)) {
+      if (e.dead || p.hit.has(e.id)) continue;
+      if (Math.hypot(e.x - p.x, e.y - p.y) < e.r + p.r) {
+        p.hit.add(e.id);
+        const l = Math.hypot(p.vx, p.vy) || 1;
+        hurt(e, p.dmg, p.vx / l, p.vy / l);
+        p.pierce--;
+        if (p.pierce <= 0) { p.life = 0; break; }
+      }
+    }
+  }
+  shots = shots.filter(p => p.life > 0);
+}
+
+// 敵を 64px の格子に入れておき、近くの敵だけを調べる（敵が多くても軽い）
+function buildGrid() {
+  grid = new Map();
+  for (const e of enemies) {
+    const k = Math.floor(e.x / 64) * 100003 + Math.floor(e.y / 64);
+    const a = grid.get(k);
+    if (a) a.push(e); else grid.set(k, [e]);
+  }
+}
+function nearCells(x, y, rad) {
+  const r = Math.max(1, Math.ceil(((rad || 0) + 40) / 64));
+  const cx = Math.floor(x / 64), cy = Math.floor(y / 64);
+  const out = [];
+  for (let i = -r; i <= r; i++) for (let j = -r; j <= r; j++) {
+    const a = grid.get((cx + i) * 100003 + (cy + j));
+    if (a) for (const e of a) out.push(e);
+  }
+  return out;
+}
+
+// =====================================================
+//  更新
+// =====================================================
+function update(dt) {
+  T += dt;
+  const v = inputVector();
+  if (v.x || v.y) { P.fx = v.x; P.fy = v.y; }
+  P.x += v.x * P.speed * dt;
+  P.y += v.y * P.speed * dt;
+  P.inv = Math.max(0, P.inv - dt);
+  P.hp = Math.min(P.maxHp, P.hp + P.regen * dt);
+
+  updateSpawns(dt);
+  buildGrid();
+  updateWeapons(dt);
+  updateShots(dt);
+
+  // 敵の移動・接触ダメージ
+  for (const e of enemies) {
+    if (e.dead) continue;
+    e.flash = Math.max(0, e.flash - dt);
+    e.orbitCd = Math.max(0, e.orbitCd - dt);
+    const dx = P.x - e.x, dy = P.y - e.y;
+    const d = Math.hypot(dx, dy) || 1;
+    e.x += (dx / d * e.speed + e.kx) * dt;
+    e.y += (dy / d * e.speed + e.ky) * dt;
+    const decay = Math.pow(0.02, dt);
+    e.kx *= decay; e.ky *= decay;
+    if (d > 1500) {   // 遠くに離れたら、プレイヤーの近くに出し直す
+      const a = Math.random() * Math.PI * 2;
+      e.x = P.x + Math.cos(a) * (Math.hypot(VW, VH) / 2 + 60);
+      e.y = P.y + Math.sin(a) * (Math.hypot(VW, VH) / 2 + 60);
+    }
+    if (d < e.r + 12 && P.inv <= 0) {
+      P.hp -= e.dmg;
+      P.inv = 0.4;
+      sfxTone(160, 70, 0.15, 'square', 0.2);
+      popText(P.x, P.y - 24, '-' + Math.round(e.dmg), '#ff6a6a');
+    }
+  }
+  enemies = enemies.filter(e => !e.dead);
+
+  // 宝石：近づくと吸い寄せられ、触れると経験値
+  for (const g of gems) {
+    const dx = P.x - g.x, dy = P.y - g.y;
+    const d = Math.hypot(dx, dy) || 1;
+    if (d < P.magnet) { g.x += dx / d * 320 * dt; g.y += dy / d * 320 * dt; }
+    if (d < 16) { g.taken = true; P.xp += g.v; sfxPickup(); }
+  }
+  gems = gems.filter(g => !g.taken);
+  while (P.xp >= P.need) { P.xp -= P.need; P.level++; P.need = xpNeed(P.level); pendingLevels++; }
+
+  for (const p of pops) { p.t -= dt; p.y -= 30 * dt; }
+  pops = pops.filter(p => p.t > 0);
+  for (const f of fxs) f.t -= dt;
+  fxs = fxs.filter(f => f.t > 0);
+
+  if (P.hp <= 0) { endGame(false); return; }
+  if (T >= GOAL_SECONDS) { endGame(true); return; }
+  if (pendingLevels > 0) { pendingLevels--; showLevelUp(); }
+}
+
+// =====================================================
+//  レベルアップ
+// =====================================================
+function shuffle(a) {
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+function buildChoices() {
+  const pool = [];
+  for (const id in WEAPONS) {
+    const w = P.weapons.find(x => x.id === id);
+    if (w) { if (w.lv < WEAPONS[id].max) pool.push({ kind: 'weapon', id, lv: w.lv + 1 }); }
+    else if (P.weapons.length < MAX_WEAPONS) pool.push({ kind: 'weapon', id, lv: 1 });
+  }
+  for (const id in PASSIVES) {
+    const lv = P.passives[id] || 0;
+    if (lv < PASSIVES[id].max && (lv > 0 || Object.keys(P.passives).length < MAX_PASSIVES)) pool.push({ kind: 'passive', id, lv: lv + 1 });
+  }
+  const picked = shuffle(pool).slice(0, 3);
+  return picked.length ? picked : [{ kind: 'heal' }];
+}
+
+function showLevelUp() {
+  mode = 'levelup';
+  choices = buildChoices();
+  luTimer = AUTO_PICK_SECONDS;
+  const box = document.getElementById('luCards');
+  box.innerHTML = '';
+  choices.forEach((c, i) => {
+    const b = document.createElement('button');
+    b.className = 'card' + (c.lv === 1 ? ' new' : '');
+    if (c.kind === 'heal') {
+      b.innerHTML = '<div class="ic">🍖</div><div class="nm">肉</div><div class="ds">HPを50回復</div>';
+    } else {
+      const d = c.kind === 'weapon' ? WEAPONS[c.id] : PASSIVES[c.id];
+      b.innerHTML = '<div class="ic">' + d.icon + '</div><div class="nm">' + d.name + ' Lv' + c.lv + (c.lv === 1 ? '（NEW）' : '')
+        + '</div><div class="ds">' + (c.kind === 'weapon' ? d.desc + '<br>' + describe(c.id, c.lv) : d.desc) + '</div>';
+    }
+    b.addEventListener('click', () => pickChoice(i));
+    box.appendChild(b);
+  });
+  document.getElementById('levelup').classList.add('show');
+  sfxLevelUp();
+}
+
+function pickChoice(i) {
+  const c = choices && choices[i];
+  if (!c || mode !== 'levelup') return;
+  if (c.kind === 'weapon') {
+    const w = P.weapons.find(x => x.id === c.id);
+    if (w) w.lv = c.lv; else P.weapons.push({ id: c.id, lv: 1, cd: 0.2 });
+  } else if (c.kind === 'passive') {
+    P.passives[c.id] = c.lv;
+  } else {
+    P.hp = Math.min(P.maxHp, P.hp + 50);
+  }
+  recompute();
+  document.getElementById('levelup').classList.remove('show');
+  mode = 'play';
+  choices = null;
+}
+
+window.addEventListener('keydown', e => {
+  if (mode === 'levelup' && choices && e.key >= '1' && e.key <= String(choices.length)) pickChoice(Number(e.key) - 1);
+});
+
+// =====================================================
+//  終了・メニュー
+// =====================================================
+function fmtTime(s) { return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(Math.floor(s % 60)).padStart(2, '0'); }
+
+function loadBest() { try { return Number(localStorage.getItem('sv_best')) || 0; } catch (e) { return 0; } }
+function saveBest(v) { try { localStorage.setItem('sv_best', String(v)); } catch (e) { /* 保存できなくても続行 */ } }
+
+function endGame(win) {
+  mode = 'end';
+  const best = loadBest();
+  const newBest = T > best;
+  if (newBest) saveBest(Math.floor(T));
+  document.getElementById('endTitle').textContent = win ? '🏆 ' + fmtTime(GOAL_SECONDS) + ' 生き残った！' : '💀 力尽きた…';
+  document.getElementById('endBody').textContent =
+    '生存時間 ' + fmtTime(T) + (newBest ? '（自己ベスト更新！）' : '（自己ベスト ' + fmtTime(best) + '）')
+    + '\n倒した敵 ' + kills + ' 体 ／ レベル ' + P.level
+    + '\n武器：' + P.weapons.map(w => WEAPONS[w.id].icon + 'Lv' + w.lv).join(' ');
+  document.getElementById('endview').classList.add('show');
+}
+
+document.getElementById('endBtn').addEventListener('click', () => {
+  document.getElementById('endview').classList.remove('show');
+  mode = 'menu';
+  showMenu();
+});
+
+function showMenu() {
+  const box = document.getElementById('chars');
+  box.innerHTML = '';
+  for (const ch of CHARACTERS) {
+    const b = document.createElement('button');
+    b.className = 'card';
+    b.innerHTML = '<div class="ic">' + ch.icon + '</div><div class="nm">' + ch.name + '</div><div class="ds">HP ' + ch.hp + ' ／ 速さ ' + ch.speed
+      + '<br>' + ch.desc.replace('\n', '<br>') + '</div>';
+    b.addEventListener('click', () => { initAudio(); startGame(ch); });
+    box.appendChild(b);
+  }
+  const best = loadBest();
+  document.getElementById('best').textContent = best ? '自己ベスト：' + fmtTime(best) : '';
+  document.getElementById('menu').classList.add('show');
+}
+
+// =====================================================
+//  音（WebAudio で作る。外部ファイル不要）。M キーで ON/OFF
+// =====================================================
+let ac = null, soundOn = true, mStep = 0, mNext = 0;
+const lastSfx = {};
+function initAudio() {
+  if (ac || typeof AudioContext === 'undefined') return;
+  ac = new AudioContext();
+  mNext = ac.currentTime + 0.1;
+  setInterval(musicTick, 50);
+}
+function toggleSound() { soundOn = !soundOn; if (ac && soundOn && ac.state === 'suspended') ac.resume(); }
+function sfxTone(f0, f1, dur, type, vol) {
+  if (!ac || !soundOn) return;
+  const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(f0, t);
+  o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(ac.destination);
+  o.start(t); o.stop(t + dur + 0.05);
+}
+function throttled(key, gap) {
+  const t = ac ? ac.currentTime : 0;
+  if (lastSfx[key] !== undefined && t - lastSfx[key] < gap) return false;
+  lastSfx[key] = t;
+  return true;
+}
+function sfxHit() { if (throttled('hit', 0.05)) sfxTone(300, 120, 0.06, 'square', 0.06); }
+function sfxPickup() { if (throttled('pick', 0.05)) sfxTone(900, 1400, 0.05, 'sine', 0.05); }
+function sfxLevelUp() { [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => sfxTone(f, f, 0.18, 'triangle', 0.15), i * 90)); }
+
+// BGM：短いコード進行の繰り返し。時間が進むほど速くなる
+const CHORDS = [[45, 57, 60, 64], [41, 53, 57, 60], [43, 55, 59, 62], [40, 52, 55, 59]];
+function hz(n) { return 440 * Math.pow(2, (n - 69) / 12); }
+function musicTick() {
+  if (!ac || !soundOn || mode === 'menu') return;
+  while (mNext < ac.currentTime + 0.3) {
+    const step = 60 / (110 + Math.min(T, 300) / 5) / 2;
+    const ch = CHORDS[Math.floor(mStep / 8) % 4], i = mStep % 8;
+    const t = mNext;
+    const note = (f, dur, type, vol) => {
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.type = type; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g); g.connect(ac.destination); o.start(t); o.stop(t + dur + 0.05);
+    };
+    if (i % 2 === 0) note(hz(ch[0]), step * 1.8, 'triangle', 0.06);
+    note(hz(ch[1 + [0, 1, 2, 1, 2, 1, 0, 1][i]] + 12), step * 0.9, 'square', 0.015);
+    mNext += step;
+    mStep++;
+  }
+}
+
+// =====================================================
+//  描画
+// =====================================================
+function icon(key, emoji, x, y, size) {
+  const img = iconImage(key);
+  if (img) { ctx.drawImage(img, x - size / 2, y - size / 2, size, size); return; }
+  ctx.font = Math.round(size) + 'px sans-serif';
+  ctx.fillText(emoji, x, y + size * 0.34);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, VW, VH);
+  ctx.textAlign = 'center';
+  if (!P) { ctx.fillStyle = '#1b2a22'; ctx.fillRect(0, 0, VW, VH); return; }
+  const cx = P.x - VW / 2, cy = P.y - VH / 2;   // カメラ
+  ctx.save();
+  ctx.translate(-cx, -cy);
+
+  // 背景（市松模様と、ところどころの草）
+  const x0 = Math.floor(cx / 64) - 1, y0 = Math.floor(cy / 64) - 1;
+  for (let gx = x0; gx <= x0 + VW / 64 + 2; gx++) {
+    for (let gy = y0; gy <= y0 + VH / 64 + 2; gy++) {
+      ctx.fillStyle = (gx + gy) & 1 ? '#27402b' : '#2b452f';
+      ctx.fillRect(gx * 64, gy * 64, 64, 64);
+      const h = ((gx * 73856093) ^ (gy * 19349663)) >>> 0;
+      if (h % 100 < 8) { ctx.globalAlpha = 0.5; ctx.font = '18px sans-serif'; ctx.fillText(['🌿', '🌼', '🍄', '🪨'][(h >> 8) % 4], gx * 64 + 32, gy * 64 + 38); ctx.globalAlpha = 1; }
+    }
+  }
+
+  // 宝石
+  for (const g of gems) {
+    ctx.fillStyle = g.v >= 25 ? '#ff6a6a' : g.v >= 5 ? '#7fe08a' : '#6ab8ff';
+    ctx.beginPath(); ctx.moveTo(g.x, g.y - 6); ctx.lineTo(g.x + 5, g.y); ctx.lineTo(g.x, g.y + 6); ctx.lineTo(g.x - 5, g.y); ctx.closePath(); ctx.fill();
+  }
+
+  // 敵
+  for (const e of enemies) {
+    const d = ENEMIES[e.kind];
+    if (e.x < cx - 60 || e.x > cx + VW + 60 || e.y < cy - 60 || e.y > cy + VH + 60) continue;
+    if (e.flash > 0) { ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 2, 0, Math.PI * 2); ctx.fill(); }
+    icon('enemy:' + e.kind, d.icon, e.x, e.y + Math.sin(T * 8 + e.id * 9) * 1.5, e.r * 2.2);
+    if (d.elite || d.boss) { ctx.fillStyle = '#222'; ctx.fillRect(e.x - e.r, e.y - e.r - 8, e.r * 2, 4); ctx.fillStyle = '#e0605a'; ctx.fillRect(e.x - e.r, e.y - e.r - 8, e.r * 2 * Math.max(0, e.hp / e.maxHp), 4); }
+  }
+
+  // 聖なる書
+  for (const w of P.weapons) if (w.id === 'orbit' && w.orbs) for (const o of w.orbs.slice(0, wstat('orbit', w.lv).n)) { ctx.fillStyle = 'rgba(255,240,150,0.9)'; ctx.beginPath(); ctx.arc(o.x, o.y, 11, 0, Math.PI * 2); ctx.fill(); icon('weapon:orbit', '📖', o.x, o.y, 20); }
+
+  // 弾
+  for (const p of shots) {
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.ang);
+    icon('weapon:' + (p.icon === '✨' ? 'wand' : p.icon === '🗡️' ? 'knife' : 'axe'), p.icon, 0, 0, p.r * 2.4);
+    ctx.restore();
+  }
+
+  // プレイヤー
+  if (!(P.inv > 0 && Math.floor(T * 20) % 2)) icon('char:' + P.ch.id, P.ch.icon, P.x, P.y + Math.sin(T * 10) * 1.5, 38);
+  ctx.fillStyle = '#222'; ctx.fillRect(P.x - 20, P.y + 22, 40, 5);
+  ctx.fillStyle = '#7fd36b'; ctx.fillRect(P.x - 20, P.y + 22, 40 * Math.max(0, P.hp / P.maxHp), 5);
+
+  // 演出
+  for (const f of fxs) {
+    if (f.kind === 'ring') { ctx.strokeStyle = f.color; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2); ctx.stroke(); ctx.lineWidth = 1; }
+    if (f.kind === 'bolt') {
+      ctx.strokeStyle = '#fff27a'; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(f.x - 10, f.y - VH / 2); ctx.lineTo(f.x + 8, f.y - VH / 4); ctx.lineTo(f.x - 6, f.y - 30); ctx.lineTo(f.x, f.y); ctx.stroke(); ctx.lineWidth = 1;
+    }
+  }
+  for (const p of pops) { ctx.globalAlpha = Math.min(1, p.t * 2); ctx.fillStyle = p.color; ctx.font = 'bold 14px sans-serif'; ctx.fillText(p.text, p.x, p.y); ctx.globalAlpha = 1; }
+  ctx.restore();
+
+  // ドラッグ操作の目印
+  if (joy.active) { ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.beginPath(); ctx.arc(joy.ox, joy.oy, 40, 0, Math.PI * 2); ctx.stroke(); ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.beginPath(); ctx.arc(joy.x, joy.y, 16, 0, Math.PI * 2); ctx.fill(); }
+
+  // 画面上の表示：経験値バー・時間・レベル・武器
+  ctx.fillStyle = '#0c1214'; ctx.fillRect(0, 0, VW, 14);
+  ctx.fillStyle = '#6ab8ff'; ctx.fillRect(0, 0, VW * Math.min(1, P.xp / P.need), 14);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'left'; ctx.fillText('Lv ' + P.level, 6, 11);
+  ctx.textAlign = 'center'; ctx.font = 'bold 26px sans-serif'; ctx.fillText(fmtTime(T), VW / 2, 44);
+  ctx.font = '12px sans-serif'; ctx.fillText('目標 ' + fmtTime(GOAL_SECONDS), VW / 2, 60);
+  ctx.textAlign = 'right'; ctx.font = 'bold 16px sans-serif'; ctx.fillText('💀 ' + kills, VW - 10, 34);
+  ctx.textAlign = 'left'; ctx.font = '15px sans-serif';
+  let ix = 8;
+  for (const w of P.weapons) { ctx.fillText(WEAPONS[w.id].icon + w.lv, ix, 34); ix += 44; }
+  ix = 8;
+  for (const id in P.passives) { ctx.fillText(PASSIVES[id].icon + P.passives[id], ix, 54); ix += 44; }
+  ctx.textAlign = 'center';
+}
+
+// =====================================================
+//  メインループ
+// =====================================================
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  if (mode === 'play') update(dt);
+  if (mode === 'levelup' && AUTO_PICK_SECONDS > 0) {   // 選ばないと、制限時間でランダムに選ばれる
+    luTimer -= dt;
+    document.getElementById('luTitle').textContent = 'LEVEL UP！（' + Math.max(0, Math.ceil(luTimer)) + '秒で自動選択）';
+    if (luTimer <= 0) pickChoice(Math.floor(Math.random() * choices.length));
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+showMenu();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
