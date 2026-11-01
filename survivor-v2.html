@@ -76,7 +76,7 @@ const MAX_PASSIVES = 8;         // 持てるアイテムの数
 const FOOD_HEAL = 50;           // 肉で回復するHP
 const FOOD_EVERY = [40, 38];    // 肉が出る間隔（秒）の最小・最大
 const FOOD_MAX = 3;             // 同時に落ちている肉の数
-const REAPER_AT = 0.8;          // 制限時間のこの割合で、中ボスの死神が出る
+const REAPER_AT = 0.6;          // 制限時間のこの割合で、中ボスの死神が出る
 const GRIM_ACCEL = 2.0;         // クリア後の「大死神」が、1秒ごとに速くなる量
 
 // ---- アイコン ----
@@ -180,7 +180,7 @@ const ENEMIES = {
   shinigami: { name: '死神',       icon: '☠️', hp: 420,  speed: 82,  dmg: 25, r: 24, xp: 120, elite: { start: 210, every: 75 } },
   dragon:    { name: '竜',         icon: '🐉', hp: 900,  speed: 60,  dmg: 30, r: 34, xp: 150, elite: { start: 240, every: 80 }, shoot: { every: 3, speed: 180, dmg: 14, n: 3 } },
   reaper:    { name: '大鎌の死神', icon: '🧛‍♂️', hp: 1500, speed: 62,  dmg: 35, r: 34, xp: 300, boss: true },
-  grim:      { name: '大死神',     icon: '☠️', hp: 1e12, speed: 110, dmg: 99999, r: 46, xp: 0, boss: true, grim: true },
+  grim:      { name: '大死神',     icon: '☠️', hp: 99999, speed: 110, dmg: 99999, r: 46, xp: 0, boss: true, grim: true },
 };
 
 // time: クリアまでの秒数 / hp, rate, dmg: 敵の硬さ・出現の多さ・攻撃力の倍率 / pool: 出てくる敵
